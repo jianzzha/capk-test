@@ -1,0 +1,175 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubevirt
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-virtualization-os-images
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: coreos-vm
+---
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  annotations:
+    cdi.kubevirt.io/storage.bind.immediate.requested: 'true'
+    cdi.kubevirt.io/storage.usePopulator: 'true'
+  name: rhcos-4.19
+  namespace: openshift-virtualization-os-images
+  labels:
+    instancetype.kubevirt.io/default-instancetype: u1.xlarge
+    instancetype.kubevirt.io/default-preference: rhel.9
+spec:
+  source:
+    http:
+      url: 'https://mirror.openshift.com/pub/openshift-v4/amd64/dependencies/rhcos/4.19/latest/rhcos-openstack.x86_64.qcow2.gz'
+  storage:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 20Gi
+    storageClassName: lvms-vg1 
+    volumeMode: Block
+---
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataSource
+metadata:
+  annotations:
+    description: RHEL CoreOS 4.19
+  labels:
+    instancetype.kubevirt.io/default-instancetype: u1.xlarge
+    instancetype.kubevirt.io/default-preference: rhel.9
+  name: rhcos-4.19
+  namespace: openshift-virtualization-os-images
+spec:
+  source:
+    pvc:
+      name: rhcos-4.19
+      namespace: openshift-virtualization-os-images
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: datavolume-clone-source
+  namespace: openshift-virtualization-os-images
+rules:
+- apiGroups: ["cdi.kubevirt.io"]
+  resources: ["datavolumes/source"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: coreos-vm-clone-access
+  namespace: openshift-virtualization-os-images
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: datavolume-clone-source
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: coreos-vm
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: coreos-ignition-config
+  namespace: coreos-vm
+stringData:
+  userdata: |
+    {
+      "ignition": {
+        "version": "3.4.0"
+      },
+      "passwd": {
+        "users": [
+          {
+            "name": "core",
+            "sshAuthorizedKeys": [
+              "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC12+OjyFU7zAS0usfS3D9E0vGjDzHMELthioS0Ra6E6X47NV/6UfIYNdXqMYHr8ak1IoCu5c1fb/9k4+2mg4+csavq0feNg4QSWLZWYci2LMozWq0UoWybiX+pogPLrLkJk7z+hSHvxSX1MBtl4qoVyhX5aJ87Go49AGgD+STofZSrrrhgCe1A7Ms/iZ3V8a7E3oKPJfIxynHTpe+7HHs7ypf63ywJ8fVzMljxHvjsGLoYqehXe5Oo1AXE78XfDc715Ntm6wkkgz+90sZevyeVn2RvEow+kMuEbnIdxk2pXZZSj8tz6RRKOlJwWdnRIJIBGK1ddfRQ+5i+wGIUsxNnbhtTMZi2nJHdb0jiKFlt+F+Jii7NwCHXNrdWL4oH//7f3mjI5YWW4vn4UE70zRWsjzKOOO6TbuSCX5CDZD8LogdMc3nW8bxQ9XbNghtp8Zi+QniAC2+HSPS8KMd+wipz//oYcUZ8fOJH7OPFIVHJ4OhtnCZN8RuYMGh8W8lQboM= jianzzha@fedora"
+            ]
+          }
+        ]
+      },
+      "systemd": {
+        "units": [
+          {
+              "dropins": [
+                {
+                  "contents": "[Service]\n# Override Execstart in main unit\nExecStart=\n# Add new Execstart with `-` prefix to ignore failure`\nExecStart=-/usr/sbin/agetty --autologin core --noclear %I $TERM\n",
+                  "name": "autologin-core.conf"
+                }
+              ],
+              "name": "serial-getty@ttyS0.service"
+          }
+        ]
+      }
+    }
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: coreos-test-1
+  namespace: coreos-vm
+spec:
+  dataVolumeTemplates:
+  - metadata:
+      name: coreos-test-1
+    spec:
+      sourceRef:
+        kind: DataSource
+        name: rhcos-4.19
+        namespace: openshift-virtualization-os-images
+      storage:
+        resources:
+          requests:
+            storage: 100Gi
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        network.kubevirt.io/headlessService: headless
+    spec:
+      domain:
+        resources:
+          limits:
+            cpu: 8
+            memory: 32Gi
+        devices:
+          disks:
+          - name: rootdisk
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: default
+            masquerade: {}
+        machine:
+          type: q35
+      networks:
+      - name: default
+        pod: {}
+      subdomain: headless
+      architecture: amd64
+      volumes:
+      - name: rootdisk
+        dataVolume:
+          name: coreos-test-1
+      - name: cloudinitdisk
+        cloudInitConfigDrive:
+          secretRef:
+            name: coreos-ignition-config

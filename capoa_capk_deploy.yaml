@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubevirt-tenant
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pull-secret
+  namespace: kubevirt-tenant
+type: Opaque
+data:
+  .dockerconfigjson: __PULL_SECRET_BASE64__
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubevirt-tenant-ssh-keys
+  namespace: kubevirt-tenant
+type: cluster.x-k8s.io/secret
+stringData:
+  ssh-publickey: "__SSH_PUBLIC_KEY__"
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: KubevirtCluster
+metadata:
+  name: kubevirt-tenant
+  namespace: kubevirt-tenant
+  labels:
+    cluster.x-k8s.io/watch-filter: multicluster-engine
+spec:
+  controlPlaneServiceTemplate:
+    spec:
+      type: ClusterIP
+  infraClusterSecretRef:
+    name: infra-cluster-credentials
+    namespace: kubevirt-tenant
+  sshKeys:
+    configRef:
+      name: kubevirt-tenant-ssh-keys
+      namespace: kubevirt-tenant
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: KubevirtMachineTemplate
+metadata:
+  name: kubevirt-tenant
+  namespace: kubevirt-tenant
+  labels:
+    cluster.x-k8s.io/watch-filter: multicluster-engine
+spec:
+  template:
+    spec:
+      virtualMachineBootstrapCheck:
+        checkStrategy: none
+      virtualMachineTemplate:
+        metadata:
+          namespace: kubevirt-tenant
+        spec:
+          dataVolumeTemplates:
+            - metadata:
+                name: rootdisk
+              spec:
+                source:
+                  pvc:
+                    name: rhcos-golden-4.22
+                    namespace: kubevirt-tenant
+                storage:
+                  accessModes:
+                    - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: 100Gi
+                  storageClassName: lvms-vg1  # Use your infra cluster's storage class
+          runStrategy: Always
+          template:
+            metadata:
+              annotations:
+                kubevirt.io/allow-pod-bridge-network-live-migration: ""
+            spec:
+              evictionStrategy: LiveMigrateIfPossible
+              domain:
+                cpu:
+                  cores: 8
+                devices:
+                  disks:
+                    - disk:
+                        bus: virtio
+                      name: rootdisk
+                  interfaces:
+                    - name: default
+                      bridge: {}
+                memory:
+                  guest: 16Gi
+              networks:
+                - name: default
+                  pod: {}
+              volumes:
+                - dataVolume:
+                    name: rootdisk
+                  name: rootdisk
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha3
+kind: OpenshiftAssistedControlPlane
+metadata:
+  name: kubevirt-tenant
+  namespace: kubevirt-tenant
+  labels:
+    cluster.x-k8s.io/watch-filter: multicluster-engine
+spec:
+  replicas: 3
+  distributionVersion: "4.22.2"
+  machineTemplate:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: kubevirt-tenant
+    infrastructureRef:
+      apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+      apiGroup: infrastructure.cluster.x-k8s.io
+      kind: KubevirtMachineTemplate
+      name: kubevirt-tenant
+  config:
+    infraClusterRef:
+      name: infra-cluster-credentials
+    clusterName: kubevirt-tenant
+    baseDomain: apps.okd-sno.lab.home
+    pullSecretRef:
+      name: pull-secret
+    sshAuthorizedKey: "__SSH_PUBLIC_KEY__"
+    cloudControllerManager:
+      enabled: true
+    csiDriver:
+      enabled: true
+      infraStorageClass: lvms-vg1  # Infra cluster's storage class
+---
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: kubevirt-tenant
+  namespace: kubevirt-tenant
+  labels:
+    cluster.x-k8s.io/watch-filter: multicluster-engine
+spec:
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: OpenshiftAssistedControlPlane
+    name: kubevirt-tenant
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: KubevirtCluster
+    name: kubevirt-tenant

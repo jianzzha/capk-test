@@ -1,0 +1,19 @@
+resources:
+  - controlplane_install.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+images:
+  - name: quay.io/edge-infrastructure/cluster-api-controlplane-provider-openshift-assisted
+    newName: quay.io/jianzzha/cluster-api-controlplane-provider-openshift-assisted
+    newTag: capk
+
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+    target:
+      kind: Deployment
+      name: capoa-controlplane-controller-manager
+      version: v1
